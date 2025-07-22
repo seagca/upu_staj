@@ -1,9 +1,12 @@
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, messagebox
 import threading
 import time
 import random
 import serial
+from serial.tools import list_ports
+import sys
+
 
 # --- Serial Communication ---
 class SerialComm:
@@ -15,19 +18,28 @@ class SerialComm:
         self.thread.start()
 
     def read_serial(self):
+        buffer = bytearray()
+        ack = bytes([0xAC])
         while self.running:
-            if self.ser.in_waiting >= 8:
-                data = self.ser.read(8)
-                if data:
-                    light_code = data[2]
-                    if light_code == 0x00:
+            incoming = self.ser.read(self.ser.in_waiting)
+            buffer.extend(incoming)
+            if len(buffer) >= 8:
+                data = buffer[:8]
+                del buffer[:8]
+
+                byte_array = list(data)
+                if check_modbus_crc(data):
+                    
+                    if data[:6] == b'\x01\x02\x03\x04\x05\x06':
                         light = 'RED'
-                    elif light_code == 0x01:
+                        #self.ser.write(ack)
+                    elif data[:6] == b'\x06\x05\x04\x03\x02\x01':
                         light = 'GREEN'
+                        #self.ser.write(ack)
                     else:
                         light = 'UNKNOWN'
                     self.callback('IN', light, data)
-            time.sleep(0.01)
+                    #self.callback('OUT', light, bytes(ack))
 
     def send_override(self, light):
         # Compose an 8-byte packet with the 3rd byte as the override request
@@ -61,20 +73,35 @@ class TrafficLightController:
 
 # --- GUI ---
 class TrafficLightGUI:
-    def __init__(self, root, port=None, baudrate=115200):
+    def __init__(self, root, baudrate=115200):
         self.root = root
         self.root.title("STM32 Traffic Light Simulator")
-        self.controller = TrafficLightController(self.log_event, port=port, baudrate=baudrate)
+        self.controller = None
+        self.baudrate = baudrate
+        self.com_port = None
+        self.connected = False
         self.setup_ui()
         self.current_state = 'RED'
-        self.update_lights('RED', None)
         self.log_entries = []
         self.timer_id = None
         self.timer_remaining = 0
-        # self.timer_label = None  # Removed, set in setup_ui
-        self.previous_light = None # Added for assumptional timer logic
+        self.previous_light = None
+        self._last_ports = []
+        self.refresh_ports()  # Start periodic port refresh
 
     def setup_ui(self):
+        # Port selection UI
+        port_frame = tk.Frame(self.root)
+        port_frame.pack(pady=5)
+        tk.Label(port_frame, text="Select COM Port:").pack(side='left', padx=5)
+        ports = list(list_ports.comports())
+        port_list = [port.device for port in ports]
+        self.selected_port = tk.StringVar(value=port_list[0] if port_list else "")
+        self.port_combo = ttk.Combobox(port_frame, textvariable=self.selected_port, values=port_list, state="readonly", width=10)
+        self.port_combo.pack(side='left', padx=5)
+        self.connect_btn = tk.Button(port_frame, text="Connect", command=self.connect_port)
+        self.connect_btn.pack(side='left', padx=5)
+
         main_frame = tk.Frame(self.root)
         main_frame.pack(pady=10)
         self.lights = {'Main': {}, 'Side': {}}
@@ -94,21 +121,43 @@ class TrafficLightGUI:
                 btn = tk.Button(col, text=f"Override {light}", command=lambda l=light, road=label: self.manual_override(l, road))
                 btn.pack(pady=2)
                 self.lights[label][light] = {'canvas': canvas, 'oval': oval}
-            # Add car canvas to the right of the lights
             car_canvas = tk.Canvas(frame, width=120, height=30, bg='white', highlightthickness=1, relief='ridge')
             car_canvas.pack(side='left', padx=20)
             self.car_canvases[label] = car_canvas
             self.draw_cars(label, stopped=True)
-        # Timer label (for user visual aid)
         self.timer_label = tk.Label(main_frame, text="", font=("Arial", 14, "bold"), fg="blue")
         self.timer_label.grid(row=2, column=0, pady=10)
-
-        # Log box (make it wider and keep it tall)
         log_frame = tk.Frame(self.root)
         log_frame.pack(pady=10, fill='x')
         tk.Label(log_frame, text="Log:").pack(side='left')
         self.log_box = scrolledtext.ScrolledText(log_frame, width=80, height=16, state='disabled')
         self.log_box.pack(pady=5)
+
+    def refresh_ports(self):
+        if not self.connected:
+            ports = list(list_ports.comports())
+            port_list = [port.device for port in ports]
+            if port_list != self._last_ports:
+                self.port_combo['values'] = port_list
+                # If the currently selected port is gone, select the first available
+                if self.selected_port.get() not in port_list:
+                    self.selected_port.set(port_list[0] if port_list else "")
+                self._last_ports = port_list
+            self.root.after(1000, self.refresh_ports)
+
+    def connect_port(self):
+        port = self.selected_port.get()
+        if not port:
+            messagebox.showerror("No Port Selected", "Please select a COM port.")
+            return
+        self.com_port = port
+        self.controller = TrafficLightController(self.log_event, port=port, baudrate=self.baudrate)
+        self.update_lights('RED', None)
+        self.animate_cars('Main')
+        self.animate_cars('Side')
+        self.connect_btn.config(state='disabled')
+        self.port_combo.config(state='disabled')
+        self.connected = True
 
     def draw_cars(self, road, stopped):
         car_canvas = self.car_canvases[road]
@@ -143,8 +192,7 @@ class TrafficLightGUI:
                     fill = color if light != active_light else 'gray'
                 info['canvas'].itemconfig(info['oval'], fill=fill)
         # Animate cars for both roads
-        self.animate_cars('Main')
-        self.animate_cars('Side')
+        
 
     def log_event(self, direction, light, data):
         entry = {
@@ -156,32 +204,31 @@ class TrafficLightGUI:
         self.log_entries.append(entry)
         self.update_log_box()
         if direction == 'IN':
-            previous_light = getattr(self, 'previous_light', None)
             self.current_state = light
             self.update_lights(light, data)
-            self.handle_assumptional_timer(light, previous_light)
+            self.reset_timer_on_signal(light)
+            self.reset_car_positions_on_signal()
             self.previous_light = light
 
-    def handle_assumptional_timer(self, light, previous_light):
-        # Only reset timer if light changes (RED<->GREEN)
-        if previous_light != light:
-            if self.timer_id:
-                self.root.after_cancel(self.timer_id)
-                self.timer_id = None
-            self.timer_label.config(text="")
-            if light == 'RED' or light == 'GREEN':
-                self.timer_remaining = 15
-                self.update_timer_label(light)
-            else:
-                self.timer_remaining = 0
-                self.timer_label.config(text="")
-        # If timer ended and same color keeps coming, reset to 15
-        elif self.timer_remaining == 0 and (light == 'RED' or light == 'GREEN'):
-            if self.timer_id:
-                self.root.after_cancel(self.timer_id)
-                self.timer_id = None
+    def reset_timer_on_signal(self, light):
+        # Always reset timer to 15 on every signal (if RED or GREEN)
+        if self.timer_id:
+            self.root.after_cancel(self.timer_id)
+            self.timer_id = None
+        self.timer_label.config(text="")
+        if light == 'RED':
             self.timer_remaining = 15
             self.update_timer_label(light)
+        elif light == 'GREEN' :
+            self.timer_remaining = 10
+            self.update_timer_label(light)
+        else:
+            self.timer_remaining = 0
+            self.timer_label.config(text="")
+
+    def reset_car_positions_on_signal(self):
+        # Reset car positions so speed does not increase with every signal
+        self.car_positions = {'Main': 0, 'Side': 0}
 
     def update_timer_label(self, light):
         if self.timer_remaining > 0:
@@ -209,13 +256,54 @@ class TrafficLightGUI:
             self.controller.manual_override(light)
 
     def on_close(self):
-        self.controller.close()
+        if self.controller:
+            self.controller.close()
         self.root.destroy()
 
+def check_modbus_crc(data: bytes) -> bool:
+    if len(data) < 3:
+        return False  # min. 1 byte data + 2 byte CRC
+    received_crc = data[-2] | (data[-1] << 8)  # LSB + MSB
+    calculated_crc = modbus_crc16(data[:-2])
+    return received_crc == calculated_crc
+
+
+def modbus_crc16(data: bytes) -> int:
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x0001:
+                crc >>= 1
+                crc ^= 0xA001
+            else:
+                crc >>= 1
+    return crc
+
+def select_port_dialog(parent):
+    ports = list(list_ports.comports())
+    port_list = [port.device for port in ports]
+    if not port_list:
+        messagebox.showerror("No Ports", "No serial ports found!", parent=parent)
+        parent.destroy()
+        sys.exit(1)
+    dialog = tk.Toplevel(parent)
+    dialog.title("Select COM Port")
+    dialog.grab_set()
+    tk.Label(dialog, text="Select COM Port:").pack(padx=10, pady=10)
+    selected_port = tk.StringVar(value=port_list[0])
+    combo = ttk.Combobox(dialog, textvariable=selected_port, values=port_list, state="readonly")
+    combo.pack(padx=10, pady=5)
+    def on_ok():
+        dialog.destroy()
+    tk.Button(dialog, text="OK", command=on_ok).pack(pady=10)
+    dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # Disable close button
+    parent.wait_window(dialog)
+    return selected_port.get()
+        
 if __name__ == "__main__":
-    COM_PORT = "COM3"
-    BAUDRATE = 115200
     root = tk.Tk()
-    app = TrafficLightGUI(root, port=COM_PORT, baudrate=BAUDRATE)
+    app = TrafficLightGUI(root, baudrate=115200)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
+
