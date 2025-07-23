@@ -1,0 +1,9 @@
+../Core/Src/main.c:41:6:main	11
+../Core/Src/main.c:130:11:ModRTw_CRC	4
+../Core/Src/main.c:147:7:HAL_UART_RxCpltCallback	5
+../Core/Src/main.c:175:7:HAL_GPIO_EXTI_Callback	2
+../Core/Src/main.c:186:7:SystemClock_Config	3
+../Core/Src/main.c:214:14:MX_GPIO_Init	1
+../Core/Src/main.c:236:14:MX_USART2_UART_Init	2
+../Core/Src/main.c:249:14:MX_USART3_UART_Init	2
+../Core/Src/main.c:262:7:Error_Handler	1
