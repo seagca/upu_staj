@@ -32,20 +32,19 @@ class SerialComm:
                     
                     if data[:6] == b'\x01\x02\x03\x04\x05\x06':
                         light = 'RED'
-                        #self.ser.write(ack)
+                        self.ser.write(ack)
                     elif data[:6] == b'\x06\x05\x04\x03\x02\x01':
                         light = 'GREEN'
-                        #self.ser.write(ack)
+                        self.ser.write(ack)
                     else:
                         light = 'UNKNOWN'
                     self.callback('IN', light, data)
-                    #self.callback('OUT', light, bytes(ack))
+                    self.callback('OUT', 'ACK', bytes(ack))
 
     def send_override(self, light):
         # Compose an 8-byte packet with the 3rd byte as the override request
         # 0x00 for RED, 0x01 for GREEN
-        data = bytearray(8)
-        data[2] = 0x00 if light == 'RED' else 0x01
+        data = bytes([0x00]) if light == 'RED' else bytes([0x01])
         self.ser.write(data)
         self.callback('OUT', light, bytes(data))
 
@@ -217,10 +216,10 @@ class TrafficLightGUI:
             self.timer_id = None
         self.timer_label.config(text="")
         if light == 'RED':
-            self.timer_remaining = 15
+            self.timer_remaining = 10
             self.update_timer_label(light)
         elif light == 'GREEN' :
-            self.timer_remaining = 10
+            self.timer_remaining = 6
             self.update_timer_label(light)
         else:
             self.timer_remaining = 0
